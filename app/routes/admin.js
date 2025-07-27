@@ -1,0 +1,165 @@
+const express = require('express');
+const bcrypt = require('bcryptjs');
+const multer = require('multer');
+const path = require('path');
+const router = express.Router();
+
+// Auth middleware
+const requireAuth = (req, res, next) => {
+  if (req.session && req.session.admin) {
+    return next();
+  }
+  res.redirect('/admin/login');
+};
+
+// Multer configuration for file uploads
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    cb(null, path.join(__dirname, '../../storage/uploads'));
+  },
+  filename: function (req, file, cb) {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
+  }
+});
+
+const upload = multer({ 
+  storage: storage,
+  limits: {
+    fileSize: 2 * 1024 * 1024 * 1024 // 2GB limit
+  },
+  fileFilter: function (req, file, cb) {
+    const allowedTypes = ['video/mp4', 'video/avi', 'video/quicktime', 'video/x-msvideo'];
+    if (allowedTypes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only video files are allowed'), false);
+    }
+  }
+});
+
+// Login page
+router.get('/login', (req, res) => {
+  if (req.session && req.session.admin) {
+    return res.redirect('/admin/dashboard');
+  }
+  res.render('pages/admin/login', { title: 'Admin Login', error: null });
+});
+
+// Login POST
+router.post('/login', async (req, res) => {
+  try {
+    const { username, password } = req.body;
+    const db = req.app.locals.db;
+    
+    console.log('=== LOGIN DEBUG ===');
+    console.log('Username:', username);
+    console.log('Password provided:', !!password);
+    
+    const [users] = await db.execute(
+      'SELECT * FROM users WHERE username = ?',
+      [username]
+    );
+    
+    console.log('Users found:', users.length);
+    
+    if (users.length === 0) {
+      console.log('No user found');
+      return res.render('pages/admin/login', { 
+        title: 'Admin Login', 
+        error: 'Invalid credentials' 
+      });
+    }
+    
+    const user = users[0];
+    console.log('User ID:', user.id);
+    console.log('Password hash length:', user.password.length);
+    
+    const isValidPassword = await bcrypt.compare(password, user.password);
+    console.log('Password valid:', isValidPassword);
+    
+    if (!isValidPassword) {
+      console.log('Password mismatch');
+      return res.render('pages/admin/login', { 
+        title: 'Admin Login', 
+        error: 'Invalid credentials' 
+      });
+    }
+    
+    req.session.admin = {
+      id: user.id,
+      username: user.username
+    };
+    
+    console.log('Login successful');
+    console.log('=== END DEBUG ===');
+    res.redirect('/admin/dashboard');
+  } catch (error) {
+    console.error('Login error:', error);
+    res.render('pages/admin/login', { 
+      title: 'Admin Login', 
+      error: 'Login failed' 
+    });
+  }
+});
+
+// Dashboard
+router.get('/dashboard', requireAuth, async (req, res) => {
+  try {
+    const db = req.app.locals.db;
+    
+    // Get statistics
+    const [videoStats] = await db.execute(
+      'SELECT COUNT(*) as total, SUM(CASE WHEN status = "completed" THEN 1 ELSE 0 END) as completed, SUM(CASE WHEN status = "processing" THEN 1 ELSE 0 END) as processing FROM videos'
+    );
+    
+    const [recentVideos] = await db.execute(
+      'SELECT id, title, status, created_at FROM videos ORDER BY created_at DESC LIMIT 5'
+    );
+    
+    res.render('pages/admin/dashboard', {
+      title: 'Admin Dashboard',
+      stats: videoStats[0],
+      recentVideos: recentVideos
+    });
+  } catch (error) {
+    console.error('Dashboard error:', error);
+    res.status(500).render('pages/error', { error: 'Unable to load dashboard' });
+  }
+});
+
+// Videos management
+router.get('/videos', requireAuth, async (req, res) => {
+  try {
+    const db = req.app.locals.db;
+    
+    const [videos] = await db.execute(
+      'SELECT * FROM videos ORDER BY created_at DESC'
+    );
+    
+    res.render('pages/admin/videos', {
+      title: 'Video Management',
+      videos: videos
+    });
+  } catch (error) {
+    console.error('Videos page error:', error);
+    res.status(500).render('pages/error', { error: 'Unable to load videos' });
+  }
+});
+
+// Upload page
+router.get('/upload', requireAuth, (req, res) => {
+  res.render('pages/admin/upload', { title: 'Upload Video' });
+});
+
+// Logout
+router.get('/logout', (req, res) => {
+  req.session.destroy((err) => {
+    if (err) {
+      console.error('Logout error:', err);
+    }
+    res.redirect('/admin/login');
+  });
+});
+
+module.exports = router;
