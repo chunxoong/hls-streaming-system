@@ -4,39 +4,16 @@ const multer = require('multer');
 const path = require('path');
 const router = express.Router();
 
-// Auth middleware
+// Auth middleware with better debugging
 const requireAuth = (req, res, next) => {
+  console.log('Auth check - Session exists:', !!req.session);
+  console.log('Auth check - Admin data:', req.session ? !!req.session.admin : false);
+  
   if (req.session && req.session.admin) {
     return next();
   }
   res.redirect('/admin/login');
 };
-
-// Multer configuration for file uploads
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, path.join(__dirname, '../../storage/uploads'));
-  },
-  filename: function (req, file, cb) {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
-  }
-});
-
-const upload = multer({ 
-  storage: storage,
-  limits: {
-    fileSize: 2 * 1024 * 1024 * 1024 // 2GB limit
-  },
-  fileFilter: function (req, file, cb) {
-    const allowedTypes = ['video/mp4', 'video/avi', 'video/quicktime', 'video/x-msvideo'];
-    if (allowedTypes.includes(file.mimetype)) {
-      cb(null, true);
-    } else {
-      cb(new Error('Only video files are allowed'), false);
-    }
-  }
-});
 
 // Login page
 router.get('/login', (req, res) => {
@@ -46,25 +23,22 @@ router.get('/login', (req, res) => {
   res.render('pages/admin/login', { title: 'Admin Login', error: null });
 });
 
-// Login POST
+// Login POST with improved session handling
 router.post('/login', async (req, res) => {
   try {
     const { username, password } = req.body;
     const db = req.app.locals.db;
     
-    console.log('=== LOGIN DEBUG ===');
+    console.log('=== LOGIN ATTEMPT ===');
     console.log('Username:', username);
-    console.log('Password provided:', !!password);
     
     const [users] = await db.execute(
       'SELECT * FROM users WHERE username = ?',
       [username]
     );
     
-    console.log('Users found:', users.length);
-    
     if (users.length === 0) {
-      console.log('No user found');
+      console.log('User not found');
       return res.render('pages/admin/login', { 
         title: 'Admin Login', 
         error: 'Invalid credentials' 
@@ -72,28 +46,36 @@ router.post('/login', async (req, res) => {
     }
     
     const user = users[0];
-    console.log('User ID:', user.id);
-    console.log('Password hash length:', user.password.length);
+    const isValid = await bcrypt.compare(password, user.password);
     
-    const isValidPassword = await bcrypt.compare(password, user.password);
-    console.log('Password valid:', isValidPassword);
-    
-    if (!isValidPassword) {
-      console.log('Password mismatch');
+    if (!isValid) {
+      console.log('Invalid password');
       return res.render('pages/admin/login', { 
         title: 'Admin Login', 
         error: 'Invalid credentials' 
       });
     }
     
+    // Set session
     req.session.admin = {
       id: user.id,
       username: user.username
     };
     
-    console.log('Login successful');
-    console.log('=== END DEBUG ===');
-    res.redirect('/admin/dashboard');
+    // Force session save
+    req.session.save((err) => {
+      if (err) {
+        console.error('Session save error:', err);
+        return res.render('pages/admin/login', { 
+          title: 'Admin Login', 
+          error: 'Session error' 
+        });
+      }
+      
+      console.log('Login successful, redirecting...');
+      res.redirect('/admin/dashboard');
+    });
+    
   } catch (error) {
     console.error('Login error:', error);
     res.render('pages/admin/login', { 
@@ -108,7 +90,6 @@ router.get('/dashboard', requireAuth, async (req, res) => {
   try {
     const db = req.app.locals.db;
     
-    // Get statistics
     const [videoStats] = await db.execute(
       'SELECT COUNT(*) as total, SUM(CASE WHEN status = "completed" THEN 1 ELSE 0 END) as completed, SUM(CASE WHEN status = "processing" THEN 1 ELSE 0 END) as processing FROM videos'
     );
@@ -119,16 +100,16 @@ router.get('/dashboard', requireAuth, async (req, res) => {
     
     res.render('pages/admin/dashboard', {
       title: 'Admin Dashboard',
-      stats: videoStats[0],
-      recentVideos: recentVideos
+      stats: videoStats[0] || { total: 0, completed: 0, processing: 0 },
+      recentVideos: recentVideos || []
     });
   } catch (error) {
     console.error('Dashboard error:', error);
-    res.status(500).render('pages/error', { error: 'Unable to load dashboard' });
+    res.status(500).send('Dashboard error: ' + error.message);
   }
 });
 
-// Videos management
+// Videos page
 router.get('/videos', requireAuth, async (req, res) => {
   try {
     const db = req.app.locals.db;
@@ -139,11 +120,11 @@ router.get('/videos', requireAuth, async (req, res) => {
     
     res.render('pages/admin/videos', {
       title: 'Video Management',
-      videos: videos
+      videos: videos || []
     });
   } catch (error) {
     console.error('Videos page error:', error);
-    res.status(500).render('pages/error', { error: 'Unable to load videos' });
+    res.status(500).send('Videos page error: ' + error.message);
   }
 });
 
@@ -155,9 +136,7 @@ router.get('/upload', requireAuth, (req, res) => {
 // Logout
 router.get('/logout', (req, res) => {
   req.session.destroy((err) => {
-    if (err) {
-      console.error('Logout error:', err);
-    }
+    if (err) console.error('Logout error:', err);
     res.redirect('/admin/login');
   });
 });

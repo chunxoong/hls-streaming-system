@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title><%= title %> - HLS4U Stream</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        .upload-area {
+            border: 2px dashed #ddd;
+            border-radius: 10px;
+            padding: 40px;
+            text-align: center;
+            background: #f8f9fa;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        .upload-area:hover {
+            border-color: #0d6efd;
+            background: #e7f1ff;
+        }
+        .upload-area.dragging {
+            border-color: #0d6efd;
+            background: #cfe2ff;
+        }
+        .file-info {
+            display: none;
+            margin-top: 20px;
+        }
+        .progress-container {
+            display: none;
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+        <div class="container">
+            <a class="navbar-brand" href="/admin/dashboard">
+                <i class="fas fa-tachometer-alt"></i> Admin Dashboard
+            </a>
+            <div class="navbar-nav ms-auto">
+                <a class="nav-link" href="/admin/videos">Videos</a>
+                <a class="nav-link active" href="/admin/upload">Upload</a>
+                <a class="nav-link" href="/admin/logout">Logout</a>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container mt-4">
+        <div class="row">
+            <div class="col-lg-8 mx-auto">
+                <h1>Upload Video</h1>
+                
+                <div class="card">
+                    <div class="card-body">
+                        <!-- Upload Method Selection -->
+                        <div class="alert alert-info mb-4">
+                            <i class="fas fa-info-circle"></i> 
+                            <strong>File Size Limits:</strong>
+                            <ul class="mb-0 mt-2">
+                                <li>Files under 100MB: Use simple upload</li>
+                                <li>Files over 100MB: Automatic chunk upload (bypasses Cloudflare limit)</li>
+                                <li>Maximum file size: 2GB</li>
+                            </ul>
+                        </div>
+
+                        <!-- Drop Zone -->
+                        <div class="upload-area" id="uploadArea">
+                            <i class="fas fa-cloud-upload-alt fa-3x mb-3"></i>
+                            <h4>Drag & Drop Video File Here</h4>
+                            <p class="text-muted">or click to browse</p>
+                            <input type="file" id="fileInput" accept="video/*" style="display: none;">
+                        </div>
+
+                        <!-- File Info -->
+                        <div class="file-info" id="fileInfo">
+                            <h5>Selected File:</h5>
+                            <table class="table">
+                                <tr>
+                                    <th>Name:</th>
+                                    <td id="fileName"></td>
+                                </tr>
+                                <tr>
+                                    <th>Size:</th>
+                                    <td id="fileSize"></td>
+                                </tr>
+                                <tr>
+                                    <th>Type:</th>
+                                    <td id="fileType"></td>
+                                </tr>
+                                <tr>
+                                    <th>Upload Method:</th>
+                                    <td id="uploadMethod"></td>
+                                </tr>
+                            </table>
+                            
+                            <div class="mb-3">
+                                <label for="videoTitle" class="form-label">Video Title (optional)</label>
+                                <input type="text" class="form-control" id="videoTitle" placeholder="Enter video title">
+                            </div>
+                            
+                            <div class="mb-3">
+                                <label for="videoDescription" class="form-label">Description (optional)</label>
+                                <textarea class="form-control" id="videoDescription" rows="3" placeholder="Enter video description"></textarea>
+                            </div>
+                            
+                            <button class="btn btn-primary" id="uploadBtn">
+                                <i class="fas fa-upload"></i> Start Upload
+                            </button>
+                            <button class="btn btn-secondary" id="cancelBtn">
+                                <i class="fas fa-times"></i> Cancel
+                            </button>
+                        </div>
+
+                        <!-- Progress -->
+                        <div class="progress-container" id="progressContainer">
+                            <h5>Upload Progress:</h5>
+                            <div class="progress mb-3" style="height: 25px;">
+                                <div class="progress-bar progress-bar-striped progress-bar-animated" 
+                                     id="progressBar" 
+                                     role="progressbar" 
+                                     style="width: 0%">0%</div>
+                            </div>
+                            <div id="uploadStatus" class="text-muted"></div>
+                            <div id="uploadSpeed" class="text-muted"></div>
+                        </div>
+
+                        <!-- Success Message -->
+                        <div class="alert alert-success d-none" id="successMessage">
+                            <i class="fas fa-check-circle"></i> 
+                            Video uploaded successfully! Processing will begin automatically.
+                            <br>
+                            <a href="/admin/videos" class="btn btn-success btn-sm mt-2">
+                                View All Videos
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        const CHUNK_SIZE = 50 * 1024 * 1024; // 50MB chunks
+        const uploadArea = document.getElementById('uploadArea');
+        const fileInput = document.getElementById('fileInput');
+        const fileInfo = document.getElementById('fileInfo');
+        const progressContainer = document.getElementById('progressContainer');
+        const uploadBtn = document.getElementById('uploadBtn');
+        const cancelBtn = document.getElementById('cancelBtn');
+        let selectedFile = null;
+        let uploadStartTime = null;
+
+        // Click to browse
+        uploadArea.addEventListener('click', () => fileInput.click());
+        
+        // File selection
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length > 0) {
+                handleFileSelect(e.target.files[0]);
+            }
+        });
+
+        // Drag and drop
+        uploadArea.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadArea.classList.add('dragging');
+        });
+
+        uploadArea.addEventListener('dragleave', () => {
+            uploadArea.classList.remove('dragging');
+        });
+
+        uploadArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadArea.classList.remove('dragging');
+            
+            if (e.dataTransfer.files.length > 0) {
+                handleFileSelect(e.dataTransfer.files[0]);
+            }
+        });
+
+        // Handle file selection
+        function handleFileSelect(file) {
+            const allowedTypes = ['video/mp4', 'video/avi', 'video/quicktime', 'video/x-msvideo', 'video/x-matroska'];
+            
+            if (!allowedTypes.includes(file.type) && !file.name.match(/\.(mp4|avi|mov|mkv|wmv)$/i)) {
+                alert('Please select a valid video file (MP4, AVI, MOV, MKV, WMV)');
+                return;
+            }
+
+            if (file.size > 2 * 1024 * 1024 * 1024) {
+                alert('File size exceeds 2GB limit');
+                return;
+            }
+
+            selectedFile = file;
+            
+            // Show file info
+            document.getElementById('fileName').textContent = file.name;
+            document.getElementById('fileSize').textContent = formatFileSize(file.size);
+            document.getElementById('fileType').textContent = file.type || 'Unknown';
+            document.getElementById('uploadMethod').textContent = 
+                file.size > 100 * 1024 * 1024 ? 'Chunk Upload (for large files)' : 'Simple Upload';
+            document.getElementById('videoTitle').value = file.name.replace(/\.[^/.]+$/, '');
+            
+            fileInfo.style.display = 'block';
+            uploadArea.style.display = 'none';
+        }
+
+        // Upload button click
+        uploadBtn.addEventListener('click', () => {
+            if (!selectedFile) return;
+            
+            uploadBtn.disabled = true;
+            cancelBtn.disabled = true;
+            progressContainer.style.display = 'block';
+            uploadStartTime = Date.now();
+            
+            if (selectedFile.size > 100 * 1024 * 1024) {
+                uploadChunked();
+            } else {
+                uploadSimple();
+            }
+        });
+
+        // Cancel button
+        cancelBtn.addEventListener('click', () => {
+            selectedFile = null;
+            fileInfo.style.display = 'none';
+            uploadArea.style.display = 'block';
+            fileInput.value = '';
+        });
+
+        // Simple upload for small files
+        function uploadSimple() {
+            const formData = new FormData();
+            formData.append('video', selectedFile);
+            formData.append('title', document.getElementById('videoTitle').value);
+            formData.append('description', document.getElementById('videoDescription').value);
+            
+            const xhr = new XMLHttpRequest();
+            
+            xhr.upload.onprogress = (e) => {
+                if (e.lengthComputable) {
+                    const percentComplete = (e.loaded / e.total) * 100;
+                    updateProgress(percentComplete, e.loaded, e.total);
+                }
+            };
+            
+            xhr.onload = () => {
+                if (xhr.status === 200) {
+                    const response = JSON.parse(xhr.responseText);
+                    showSuccess(response.message);
+                } else {
+                    showError('Upload failed');
+                }
+            };
+            
+            xhr.onerror = () => showError('Upload failed');
+            
+            xhr.open('POST', '/upload/video');
+            xhr.send(formData);
+        }
+
+        // Chunked upload for large files
+        async function uploadChunked() {
+            const totalChunks = Math.ceil(selectedFile.size / CHUNK_SIZE);
+            
+            try {
+                // Initialize upload
+                const initResponse = await fetch('/upload/init', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        fileName: selectedFile.name,
+                        fileSize: selectedFile.size,
+                        totalChunks: totalChunks
+                    })
+                });
+                
+                const { uploadId, videoId, fileName } = await initResponse.json();
+                
+                // Upload chunks
+                for (let i = 0; i < totalChunks; i++) {
+                    const start = i * CHUNK_SIZE;
+                    const end = Math.min(start + CHUNK_SIZE, selectedFile.size);
+                    const chunk = selectedFile.slice(start, end);
+                    
+                    const formData = new FormData();
+                    formData.append('chunk', chunk);
+                    formData.append('uploadId', uploadId);
+                    formData.append('chunkIndex', i);
+                    formData.append('totalChunks', totalChunks);
+                    formData.append('videoId', videoId);
+                    
+                    const response = await fetch('/upload/chunk', {
+                        method: 'POST',
+                        body: formData
+                    });
+                    
+                    if (!response.ok) throw new Error('Chunk upload failed');
+                    
+                    const percentComplete = ((i + 1) / totalChunks) * 100;
+                    updateProgress(percentComplete, end, selectedFile.size);
+                    document.getElementById('uploadStatus').textContent = 
+                        `Uploading chunk ${i + 1} of ${totalChunks}`;
+                }
+                
+                // Merge chunks
+                document.getElementById('uploadStatus').textContent = 'Merging chunks...';
+                
+                const mergeResponse = await fetch('/upload/merge', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        uploadId: uploadId,
+                        videoId: videoId,
+                        fileName: fileName,
+                        totalChunks: totalChunks
+                    })
+                });
+                
+                if (mergeResponse.ok) {
+                    const result = await mergeResponse.json();
+                    showSuccess(result.message);
+                } else {
+                    throw new Error('Merge failed');
+                }
+                
+            } catch (error) {
+                showError('Upload failed: ' + error.message);
+            }
+        }
+
+        // Update progress bar
+        function updateProgress(percent, loaded, total) {
+            const progressBar = document.getElementById('progressBar');
+            progressBar.style.width = percent + '%';
+            progressBar.textContent = Math.round(percent) + '%';
+            
+            // Calculate upload speed
+            const elapsedTime = (Date.now() - uploadStartTime) / 1000; // seconds
+            const uploadSpeed = loaded / elapsedTime; // bytes per second
+            
+            document.getElementById('uploadSpeed').textContent = 
+                `Speed: ${formatFileSize(uploadSpeed)}/s | ` +
+                `Uploaded: ${formatFileSize(loaded)} / ${formatFileSize(total)}`;
+        }
+
+        // Show success message
+        function showSuccess(message) {
+            progressContainer.style.display = 'none';
+            document.getElementById('successMessage').classList.remove('d-none');
+            document.getElementById('successMessage').innerHTML = 
+                `<i class="fas fa-check-circle"></i> ${message}<br>` +
+                `<a href="/admin/videos" class="btn btn-success btn-sm mt-2">View All Videos</a>`;
+        }
+
+        // Show error message
+        function showError(message) {
+            progressContainer.style.display = 'none';
+            alert('Error: ' + message);
+            uploadBtn.disabled = false;
+            cancelBtn.disabled = false;
+        }
+
+        // Format file size
+        function formatFileSize(bytes) {
+            if (bytes === 0) return '0 Bytes';
+            const k = 1024;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+    </script>
+</body>
+</html>

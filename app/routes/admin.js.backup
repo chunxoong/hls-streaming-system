@@ -4,8 +4,14 @@ const multer = require('multer');
 const path = require('path');
 const router = express.Router();
 
-// Auth middleware
+// Auth middleware with debugging
 const requireAuth = (req, res, next) => {
+  console.log('=== AUTH CHECK ===');
+  console.log('Session ID:', req.sessionID);
+  console.log('Session exists:', !!req.session);
+  console.log('Session admin:', req.session ? req.session.admin : 'No session');
+  console.log('=== END AUTH CHECK ===');
+  
   if (req.session && req.session.admin) {
     return next();
   }
@@ -40,6 +46,11 @@ const upload = multer({
 
 // Login page
 router.get('/login', (req, res) => {
+  console.log('=== LOGIN PAGE ===');
+  console.log('Session exists:', !!req.session);
+  console.log('Admin logged in:', req.session ? !!req.session.admin : false);
+  console.log('=== END LOGIN PAGE ===');
+  
   if (req.session && req.session.admin) {
     return res.redirect('/admin/dashboard');
   }
@@ -52,12 +63,20 @@ router.post('/login', async (req, res) => {
     const { username, password } = req.body;
     const db = req.app.locals.db;
     
+    console.log('=== LOGIN DEBUG ===');
+    console.log('Session ID before:', req.sessionID);
+    console.log('Username:', username);
+    console.log('Password provided:', !!password);
+    
     const [users] = await db.execute(
       'SELECT * FROM users WHERE username = ?',
       [username]
     );
     
+    console.log('Users found:', users.length);
+    
     if (users.length === 0) {
+      console.log('No user found');
       return res.render('pages/admin/login', { 
         title: 'Admin Login', 
         error: 'Invalid credentials' 
@@ -65,21 +84,45 @@ router.post('/login', async (req, res) => {
     }
     
     const user = users[0];
+    console.log('User ID:', user.id);
+    console.log('Password hash length:', user.password.length);
+    
     const isValidPassword = await bcrypt.compare(password, user.password);
+    console.log('Password valid:', isValidPassword);
     
     if (!isValidPassword) {
+      console.log('Password mismatch');
       return res.render('pages/admin/login', { 
         title: 'Admin Login', 
         error: 'Invalid credentials' 
       });
     }
     
+    // Save session data
     req.session.admin = {
       id: user.id,
       username: user.username
     };
     
-    res.redirect('/admin/dashboard');
+    // Save session explicitly
+    req.session.save((err) => {
+      if (err) {
+        console.error('Session save error:', err);
+        return res.render('pages/admin/login', { 
+          title: 'Admin Login', 
+          error: 'Session error' 
+        });
+      }
+      
+      console.log('Session saved successfully');
+      console.log('Session ID after:', req.sessionID);
+      console.log('Session admin after:', req.session.admin);
+      console.log('Login successful');
+      console.log('=== END DEBUG ===');
+      
+      res.redirect('/admin/dashboard');
+    });
+    
   } catch (error) {
     console.error('Login error:', error);
     res.render('pages/admin/login', { 
