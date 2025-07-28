@@ -180,7 +180,7 @@ app.use(express.json({ limit: '100mb' }));
 app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 
 // Static files serving with optimized headers
-app.use('/hls', express.static(path.join(__dirname, 'hls'), {
+app.use('/hls', express.static(path.join(__dirname, 'public/hls'), {
   setHeaders: (res, filePath) => {
     if (filePath.endsWith('.m3u8')) {
       res.setHeader('Cache-Control', 'public, max-age=10');

@@ -1,248 +1,208 @@
+// app/services/hlsProcessor.js - FIXED VERSION với đúng path
 const ffmpeg = require('fluent-ffmpeg');
 const path = require('path');
 const fs = require('fs').promises;
+const Redis = require('ioredis');
 
 class HLSProcessor {
-  constructor(db) {
-    this.db = db;
-    this.processing = false;
-    this.queue = [];
-  }
-
-  // Add video to processing queue
-  addToQueue(videoData) {
-    this.queue.push(videoData);
-    console.log(`📹 Added video ${videoData.videoId} to HLS processing queue`);
+  constructor() {
+    this.redis = new Redis({
+      host: 'localhost',
+      port: 6379,
+      retryDelayOnFailover: 100,
+      maxRetriesPerRequest: 3
+    });
     
-    // Start processing if not already running
-    if (!this.processing) {
-      this.processNext();
-    }
-  }
-
-  // Process next video in queue
-  async processNext() {
-    if (this.queue.length === 0) {
-      this.processing = false;
-      return;
-    }
-
-    this.processing = true;
-    const videoData = this.queue.shift();
+    this.isProcessing = false;
     
-    try {
-      await this.processVideo(videoData);
-    } catch (error) {
-      console.error(`❌ HLS processing failed for video ${videoData.videoId}:`, error);
-      await this.updateVideoStatus(videoData.videoId, 'error');
-    }
-
-    // Process next video
-    this.processNext();
+    // Start queue processor
+    this.startQueueProcessor();
+    
+    console.log('✅ HLS Processor initialized - Fixed Version');
   }
 
-  // Main video processing function
-  async processVideo(videoData) {
-    const { videoId, fileName, finalPath } = videoData;
-    console.log(`🎬 Starting HLS conversion for video ${videoId}`);
+  async startQueueProcessor() {
+    console.log('🚀 Starting HLS queue processor...');
+    
+    // Process pending videos from database first
+    await this.processPendingVideos();
+    
+    // Then start Redis queue monitoring
+    setInterval(async () => {
+      if (!this.isProcessing) {
+        await this.processQueue();
+      }
+    }, 5000); // Check every 5 seconds
+    
+    console.log('✅ Queue processor started successfully');
+  }
 
+  async processPendingVideos() {
     try {
-      // Create HLS output directory
-      const hlsDir = path.join(__dirname, '../../hls', `video-${videoId}`);
-      await fs.mkdir(hlsDir, { recursive: true });
+      const mysql = require('mysql2/promise');
+      const connection = await mysql.createConnection({
+        host: 'localhost',
+        user: 'hls4u-stream',
+        password: 'N72kySNBgREd9nNCnu3m',
+        database: 'hls4u-stream'
+      });
 
-      // Get video info
-      const videoInfo = await this.getVideoInfo(finalPath);
-      console.log(`📊 Video info:`, videoInfo);
-
-      // Update video metadata
-      await this.updateVideoMetadata(videoId, videoInfo);
-
-      // Generate thumbnail
-      const thumbnailPath = await this.generateThumbnail(finalPath, videoId);
-
-      // Convert to HLS with multiple qualities
-      const hlsPath = await this.convertToHLS(finalPath, hlsDir, videoId, videoInfo);
-
-      // Update video record
-      await this.db.execute(
-        'UPDATE videos SET status = ?, hls_path = ?, thumbnail_path = ?, duration = ?, resolution = ? WHERE id = ?',
-        ['completed', hlsPath, thumbnailPath, videoInfo.duration, videoInfo.resolution, videoId]
+      const [pendingVideos] = await connection.execute(
+        'SELECT * FROM videos WHERE status = "processing" ORDER BY created_at ASC'
       );
 
-      console.log(`✅ HLS conversion completed for video ${videoId}`);
-      
+      console.log(`📋 Found ${pendingVideos.length} pending videos to process`);
+
+      for (const video of pendingVideos) {
+        console.log(`➕ Adding pending video to queue: ${video.title} (ID: ${video.id})`);
+        await this.addToQueue(video);
+      }
+
+      await connection.end();
     } catch (error) {
-      console.error(`❌ Error processing video ${videoId}:`, error);
-      throw error;
+      console.error('❌ Error processing pending videos:', error);
     }
   }
 
-  // Get video information using ffprobe
-  getVideoInfo(inputPath) {
-    return new Promise((resolve, reject) => {
-      ffmpeg.ffprobe(inputPath, (err, metadata) => {
-        if (err) {
-          reject(err);
-          return;
-        }
-
-        const videoStream = metadata.streams.find(s => s.codec_type === 'video');
-        const audioStream = metadata.streams.find(s => s.codec_type === 'audio');
-
-        resolve({
-          duration: Math.round(metadata.format.duration),
-          bitrate: metadata.format.bit_rate,
-          size: metadata.format.size,
-          resolution: videoStream ? `${videoStream.width}x${videoStream.height}` : 'unknown',
-          videoCodec: videoStream ? videoStream.codec_name : 'unknown',
-          audioCodec: audioStream ? audioStream.codec_name : 'unknown',
-          fps: videoStream ? eval(videoStream.r_frame_rate) : 0
-        });
-      });
-    });
+  async addToQueue(videoData) {
+    try {
+      await this.redis.lpush('hls_queue', JSON.stringify(videoData));
+      console.log(`✅ Video added to HLS queue: ${videoData.title} (ID: ${videoData.id})`);
+    } catch (error) {
+      console.error('❌ Error adding video to queue:', error);
+    }
   }
 
-  // Generate thumbnail
-  async generateThumbnail(inputPath, videoId) {
-    const thumbnailDir = path.join(__dirname, '../../public/thumbnails');
-    await fs.mkdir(thumbnailDir, { recursive: true });
-    
-    const thumbnailPath = path.join(thumbnailDir, `video-${videoId}.jpg`);
-    const publicPath = `/public/thumbnails/video-${videoId}.jpg`;
-
-    return new Promise((resolve, reject) => {
-      ffmpeg(inputPath)
-        .screenshots({
-          timestamps: ['10%'], // Take screenshot at 10% of video duration
-          filename: `video-${videoId}.jpg`,
-          folder: thumbnailDir,
-          size: '640x360'
-        })
-        .on('end', () => {
-          console.log(`📸 Thumbnail generated for video ${videoId}`);
-          resolve(publicPath);
-        })
-        .on('error', (err) => {
-          console.error(`❌ Thumbnail generation failed:`, err);
-          reject(err);
-        });
-    });
-  }
-
-  // Convert video to HLS format with multiple qualities
-  async convertToHLS(inputPath, outputDir, videoId, videoInfo) {
-    const masterPlaylist = path.join(outputDir, 'playlist.m3u8');
-    const publicPath = `/hls/video-${videoId}/playlist.m3u8`;
-
-    // Determine which qualities to generate based on source resolution
-    const sourceHeight = parseInt(videoInfo.resolution.split('x')[1]);
-    const qualities = this.determineQualities(sourceHeight);
-
-    console.log(`🎯 Generating qualities:`, qualities.map(q => q.name).join(', '));
-
-    // Generate HLS for each quality
-    const variantPlaylists = [];
-    
-    for (const quality of qualities) {
-      const variantName = `${quality.name}/playlist.m3u8`;
-      const variantDir = path.join(outputDir, quality.name);
-      await fs.mkdir(variantDir, { recursive: true });
-
-      await this.generateHLSVariant(inputPath, variantDir, quality);
+  async processQueue() {
+    try {
+      const videoDataStr = await this.redis.brpop('hls_queue', 1);
       
-      variantPlaylists.push({
-        name: quality.name,
-        bandwidth: quality.bitrate * 1000,
-        resolution: quality.resolution,
-        playlist: `${quality.name}/playlist.m3u8`
-      });
+      if (videoDataStr && videoDataStr[1]) {
+        const videoData = JSON.parse(videoDataStr[1]);
+        console.log(`🎬 Processing video from queue: ${videoData.title} (ID: ${videoData.id})`);
+        
+        this.isProcessing = true;
+        await this.processVideo(videoData);
+        this.isProcessing = false;
+      }
+    } catch (error) {
+      console.error('❌ Error processing queue:', error);
+      this.isProcessing = false;
     }
-
-    // Create master playlist
-    await this.createMasterPlaylist(masterPlaylist, variantPlaylists);
-
-    return publicPath;
   }
 
-  // Determine which qualities to generate
-  determineQualities(sourceHeight) {
-    const allQualities = [
-      { name: '1080p', height: 1080, bitrate: 5000, resolution: '1920x1080' },
-      { name: '720p', height: 720, bitrate: 3000, resolution: '1280x720' },
-      { name: '480p', height: 480, bitrate: 1500, resolution: '854x480' },
-      { name: '360p', height: 360, bitrate: 800, resolution: '640x360' }
-    ];
+  async processVideo(videoData) {
+    const mysql = require('mysql2/promise');
+    let connection;
 
-    // Only include qualities that are equal or lower than source
-    return allQualities.filter(q => q.height <= sourceHeight);
-  }
+    try {
+      connection = await mysql.createConnection({
+        host: 'localhost',
+        user: 'hls4u-stream',
+        password: 'N72kySNBgREd9nNCnu3m',
+        database: 'hls4u-stream'
+      });
 
-  // Generate HLS variant
-  generateHLSVariant(inputPath, outputDir, quality) {
-    return new Promise((resolve, reject) => {
+      console.log(`🔄 Starting HLS processing for: ${videoData.title} (ID: ${videoData.id})`);
+      
+      // Update status to processing
+      await connection.execute(
+        'UPDATE videos SET status = ?, updated_at = NOW() WHERE id = ?',
+        ['processing', videoData.id]
+      );
+
+      // FIXED: Use correct path - storage/uploads instead of uploads
+      const inputPath = path.join(__dirname, '../../storage/uploads', videoData.filename);
+      
+      console.log(`📁 Looking for file: ${inputPath}`);
+      
+      try {
+        await fs.access(inputPath);
+        console.log(`✅ Input file found: ${inputPath}`);
+      } catch {
+        throw new Error(`Input file not found: ${inputPath}`);
+      }
+
+      // Create output directory
+      const outputDir = path.join(__dirname, '../../public/hls', videoData.id.toString());
+      await fs.mkdir(outputDir, { recursive: true });
+      console.log(`📁 Created output directory: ${outputDir}`);
+
+      // Generate HLS files
       const outputPath = path.join(outputDir, 'playlist.m3u8');
       
+      await this.convertToHLS(inputPath, outputPath, videoData.id);
+
+      // Update database with success
+      const hlsPath = `/hls/${videoData.id}/playlist.m3u8`;
+      await connection.execute(
+        'UPDATE videos SET status = ?, hls_path = ?, updated_at = NOW() WHERE id = ?',
+        ['completed', hlsPath, videoData.id]
+      );
+
+      console.log(`✅ HLS processing completed for: ${videoData.title} (ID: ${videoData.id})`);
+
+    } catch (error) {
+      console.error(`❌ HLS processing failed for: ${videoData.title} (ID: ${videoData.id})`, error);
+      
+      if (connection) {
+        await connection.execute(
+          'UPDATE videos SET status = ?, updated_at = NOW() WHERE id = ?',
+          ['error', videoData.id]
+        );
+      }
+    } finally {
+      if (connection) {
+        await connection.end();
+      }
+    }
+  }
+
+  convertToHLS(inputPath, outputPath, videoId) {
+    return new Promise((resolve, reject) => {
+      console.log(`🎞️  Converting ${inputPath} to HLS...`);
+      
+      const startTime = Date.now();
+      
       ffmpeg(inputPath)
-        .outputOptions([
-          '-c:v libx264',
-          '-c:a aac',
-          '-b:v ' + quality.bitrate + 'k',
-          '-b:a 128k',
-          '-vf scale=' + quality.resolution,
-          '-f hls',
+        .addOptions([
+          '-profile:v baseline',
+          '-level 3.0',
+          '-start_number 0',
           '-hls_time 10',
           '-hls_list_size 0',
-          '-hls_segment_filename ' + path.join(outputDir, 'segment_%03d.ts')
+          '-f hls',
+          '-hls_segment_filename', path.join(path.dirname(outputPath), 'segment%03d.ts')
         ])
         .output(outputPath)
-        .on('start', (cmd) => {
-          console.log(`🚀 Starting ${quality.name} conversion...`);
+        .on('start', (commandLine) => {
+          console.log(`🚀 FFmpeg command: ${commandLine}`);
         })
         .on('progress', (progress) => {
           if (progress.percent) {
-            console.log(`⏳ ${quality.name}: ${Math.round(progress.percent)}%`);
+            console.log(`⏳ Processing video ${videoId}: ${Math.round(progress.percent)}% complete`);
           }
         })
         .on('end', () => {
-          console.log(`✅ ${quality.name} conversion completed`);
+          const duration = Math.round((Date.now() - startTime) / 1000);
+          console.log(`✅ FFmpeg finished processing video ${videoId} in ${duration}s`);
           resolve();
         })
         .on('error', (err) => {
-          console.error(`❌ ${quality.name} conversion failed:`, err);
+          console.error(`❌ FFmpeg error for video ${videoId}:`, err);
           reject(err);
         })
         .run();
     });
   }
 
-  // Create master playlist
-  async createMasterPlaylist(masterPath, variants) {
-    let content = '#EXTM3U\n#EXT-X-VERSION:3\n\n';
-    
-    for (const variant of variants) {
-      content += `#EXT-X-STREAM-INF:BANDWIDTH=${variant.bandwidth},RESOLUTION=${variant.resolution}\n`;
-      content += `${variant.playlist}\n\n`;
+  async getQueueLength() {
+    try {
+      return await this.redis.llen('hls_queue');
+    } catch (error) {
+      console.error('❌ Error getting queue length:', error);
+      return 0;
     }
-
-    await fs.writeFile(masterPath, content);
-    console.log(`📄 Master playlist created`);
-  }
-
-  // Update video metadata
-  async updateVideoMetadata(videoId, videoInfo) {
-    await this.db.execute(
-      'UPDATE videos SET duration = ?, resolution = ? WHERE id = ?',
-      [videoInfo.duration, videoInfo.resolution, videoId]
-    );
-  }
-
-  // Update video status
-  async updateVideoStatus(videoId, status) {
-    await this.db.execute(
-      'UPDATE videos SET status = ? WHERE id = ?',
-      [status, videoId]
-    );
   }
 }
 
