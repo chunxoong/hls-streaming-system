@@ -7,7 +7,6 @@ const path = require('path');
 const helmet = require('helmet');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
-const HLSProcessor = require('./app/services/hlsProcessor');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -326,20 +325,24 @@ const startServer = async () => {
     app.use('/upload', require('./app/routes/upload'));
     console.log('✅ Routes loaded');
     
-    // Step 5: Initialize HLS processor
-console.log('📦 Step 5: Initializing HLS processor...');
-const hlsProcessor = new HLSProcessor(dbPool);
-app.locals.hlsProcessor = hlsProcessor;
-
-// Process any videos in the queue
-setInterval(() => {
-  const queue = app.locals.hlsQueue || [];
-  while (queue.length > 0) {
-    const videoData = queue.shift();
-    hlsProcessor.addToQueue(videoData);
-  }
-}, 5000); // Check every 5 seconds
-console.log('✅ HLS processor initialized');
+    // Step 5: Error handling middleware
+    app.use((err, req, res, next) => {
+      console.error('💥 Application Error:', err);
+      
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(413).json({ error: 'File too large' });
+      }
+      
+      if (err.message && err.message.includes('CORS')) {
+        return res.status(403).json({ error: 'CORS policy violation' });
+      }
+      
+      res.status(500).json({ 
+        error: process.env.NODE_ENV === 'production' 
+          ? 'Internal server error' 
+          : err.message 
+      });
+    });
     
     // 404 handler
     app.use((req, res) => {

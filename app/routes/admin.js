@@ -141,4 +141,10 @@ router.get('/logout', (req, res) => {
   });
 });
 
+// Redirect /admin to /admin/login
+router.get('/', (req, res) => {
+  res.redirect('/admin/login');
+});
+
+
 module.exports = router;

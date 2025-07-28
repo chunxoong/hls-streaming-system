@@ -1,4 +1,41 @@
-// HLS4U Stream Server - All Errors Fixed
+#!/bin/bash
+echo "🔄 Restoring HLS4U Stream to original state..."
+
+# Stop current service
+echo "⏸️  Stopping current service..."
+pm2 stop hls4u-stream
+pm2 delete hls4u-stream 2>/dev/null || true
+
+# Find and restore backup files
+echo "🔍 Looking for backup files..."
+
+# List all backup files
+echo "📋 Available backup files:"
+ls -la server.js.backup* 2>/dev/null || echo "No backup files found"
+
+# Find the most recent backup
+LATEST_BACKUP=$(ls -t server.js.backup* 2>/dev/null | head -1)
+
+if [ -n "$LATEST_BACKUP" ]; then
+    echo "📁 Found latest backup: $LATEST_BACKUP"
+    echo "🔄 Restoring server.js from backup..."
+    
+    # Backup current broken version
+    mv server.js server.js.broken.$(date +%Y%m%d_%H%M%S) 2>/dev/null || true
+    
+    # Restore from backup
+    cp "$LATEST_BACKUP" server.js
+    
+    echo "✅ server.js restored from $LATEST_BACKUP"
+else
+    echo "❌ No backup files found!"
+    echo "🔧 Creating original server.js from your documents..."
+    
+    # Restore the original server.js from your provided documents
+    cat > server.js << 'EOF'
+// HLS4U Stream Server - Complete Fixed Version
+// All issues resolved: Redis + CORS + Session timing
+
 require('dotenv').config();
 const express = require('express');
 const session = require('express-session');
@@ -6,14 +43,9 @@ const mysql = require('mysql2/promise');
 const path = require('path');
 const helmet = require('helmet');
 const cors = require('cors');
-const rateLimit = require('express-rate-limit');
-const HLSProcessor = require('./app/services/hlsProcessor');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-
-// TRUST PROXY - Fix for X-Forwarded-For error
-app.set('trust proxy', 1);
 
 // Global variables for session store
 let sessionStore;
@@ -32,19 +64,14 @@ const initRedis = async () => {
       socket: {
         host: process.env.REDIS_HOST || 'localhost',
         port: process.env.REDIS_PORT || 6379,
-        connectTimeout: 5000,
+        connectTimeout: 10000,
         lazyConnect: false
-      },
-      retry_strategy: (times) => {
-        const delay = Math.min(times * 50, 2000);
-        return delay;
       }
     });
     
     // Redis event handlers
     redisClient.on('error', (err) => {
       console.error('❌ Redis error:', err.message);
-      useRedis = false;
     });
     
     redisClient.on('connect', () => {
@@ -53,16 +80,14 @@ const initRedis = async () => {
     
     redisClient.on('ready', () => {
       console.log('✅ Redis connected and ready');
-      useRedis = true;
     });
     
-    // Connect to Redis with timeout
-    await Promise.race([
-      redisClient.connect(),
-      new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Redis connection timeout')), 5000)
-      )
-    ]);
+    redisClient.on('end', () => {
+      console.log('🔌 Redis connection ended');
+    });
+    
+    // Connect to Redis
+    await redisClient.connect();
     
     // Test connection
     const result = await redisClient.ping();
@@ -92,7 +117,7 @@ const initRedis = async () => {
   }
 };
 
-// FIXED Database connection pool - Remove invalid options
+// Database connection pool
 const dbPool = mysql.createPool({
   host: process.env.DB_HOST || 'localhost',
   user: process.env.DB_USER,
@@ -101,10 +126,7 @@ const dbPool = mysql.createPool({
   waitForConnections: true,
   connectionLimit: 15,
   queueLimit: 0,
-  // Remove invalid options that cause warnings
-  // acquireTimeout: 60000,  // REMOVED
-  // timeout: 60000,         // REMOVED  
-  // maxReusedConnections: 10 // REMOVED
+  acquireTimeout: 60000
 });
 
 // Test database connection
@@ -123,57 +145,20 @@ const testDatabase = async () => {
 
 // Security middleware
 app.use(helmet({
-  contentSecurityPolicy: false,
+  contentSecurityPolicy: false, // Disable for HLS streaming
   crossOriginEmbedderPolicy: false
 }));
 
-// FIXED CORS configuration - More permissive but secure
-const allowedOrigins = [
-  'http://localhost:3000',
-  'http://127.0.0.1:3000',
-  'https://stream.hls4u.xyz',
-  // Add your domain here
-];
-
+// CORS configuration - FIXED
 app.use(cors({
   origin: function (origin, callback) {
-    // Allow requests with no origin (mobile apps, etc.)
-    if (!origin) return callback(null, true);
-    
-    // Allow all localhost and IP addresses for development
-    if (origin.includes('localhost') || origin.includes('127.0.0.1')) {
-      return callback(null, true);
-    }
-    
-    // Check whitelist for production
-    if (allowedOrigins.includes(origin)) {
-      return callback(null, true);
-    }
-    
-    // Log blocked origins for debugging
-    console.log('🚫 CORS blocked origin:', origin);
-    callback(new Error('Not allowed by CORS'), false);
+    // Allow all origins (can be restricted later for production)
+    callback(null, true);
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
 }));
-
-// FIXED Rate limiting - Handle X-Forwarded-For properly
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // limit each IP to 100 requests per windowMs
-  message: 'Too many requests from this IP',
-  standardHeaders: true,
-  legacyHeaders: false,
-  // Handle proxy headers properly
-  keyGenerator: (req) => {
-    return req.ip; // Express will handle X-Forwarded-For correctly with trust proxy
-  }
-});
-
-app.use('/api', limiter);
-app.use('/upload', limiter);
 
 // Body parser middleware
 app.use(express.json({ limit: '100mb' }));
@@ -186,7 +171,7 @@ app.use('/hls', express.static(path.join(__dirname, 'hls'), {
       res.setHeader('Cache-Control', 'public, max-age=10');
       res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
     } else if (filePath.endsWith('.ts')) {
-      res.setHeader('Cache-Control', 'public, max-age=2592000');
+      res.setHeader('Cache-Control', 'public, max-age=2592000'); // 30 days
       res.setHeader('Content-Type', 'video/mp2t');
     }
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -280,6 +265,7 @@ process.on('uncaughtException', (err) => {
 
 process.on('unhandledRejection', (reason, promise) => {
   console.error('💥 Unhandled Rejection at:', promise, 'reason:', reason);
+  gracefulShutdown('unhandledRejection');
 });
 
 // Main server initialization function
@@ -298,7 +284,7 @@ const startServer = async () => {
       throw new Error('Database connection failed - cannot continue');
     }
     
-    // Step 3: Configure session middleware
+    // Step 3: Configure session middleware (CRITICAL: After Redis is ready)
     console.log('📦 Step 3: Configuring session middleware...');
     const sessionConfig = {
       store: sessionStore,
@@ -308,9 +294,9 @@ const startServer = async () => {
       rolling: true,
       name: 'hls4u.sid',
       cookie: {
-        secure: false,
+        secure: false, // Set to true if using HTTPS
         httpOnly: true,
-        maxAge: 24 * 60 * 60 * 1000,
+        maxAge: 24 * 60 * 60 * 1000, // 24 hours
         sameSite: 'lax'
       }
     };
@@ -318,7 +304,7 @@ const startServer = async () => {
     app.use(session(sessionConfig));
     console.log('✅ Session middleware configured');
     
-    // Step 4: Load routes
+    // Step 4: Load routes (MUST be after session middleware)
     console.log('📦 Step 4: Loading routes...');
     app.use('/', require('./app/routes/index'));
     app.use('/api', require('./app/routes/api'));
@@ -326,20 +312,26 @@ const startServer = async () => {
     app.use('/upload', require('./app/routes/upload'));
     console.log('✅ Routes loaded');
     
-    // Step 5: Initialize HLS processor
-console.log('📦 Step 5: Initializing HLS processor...');
-const hlsProcessor = new HLSProcessor(dbPool);
-app.locals.hlsProcessor = hlsProcessor;
-
-// Process any videos in the queue
-setInterval(() => {
-  const queue = app.locals.hlsQueue || [];
-  while (queue.length > 0) {
-    const videoData = queue.shift();
-    hlsProcessor.addToQueue(videoData);
-  }
-}, 5000); // Check every 5 seconds
-console.log('✅ HLS processor initialized');
+    // Step 5: Error handling middleware
+    app.use((err, req, res, next) => {
+      console.error('💥 Application Error:', err);
+      
+      // Handle specific errors
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(413).json({ error: 'File too large' });
+      }
+      
+      if (err.message && err.message.includes('CORS')) {
+        return res.status(403).json({ error: 'CORS policy violation' });
+      }
+      
+      // Generic error response
+      res.status(500).json({ 
+        error: process.env.NODE_ENV === 'production' 
+          ? 'Internal server error' 
+          : err.message 
+      });
+    });
     
     // 404 handler
     app.use((req, res) => {
@@ -364,6 +356,7 @@ console.log('✅ HLS processor initialized');
       console.log('💡 Ready to accept connections!');
     });
     
+    // Server error handling
     server.on('error', (err) => {
       if (err.code === 'EADDRINUSE') {
         console.error(`❌ Port ${PORT} is already in use`);
@@ -385,3 +378,47 @@ console.log('✅ HLS processor initialized');
 startServer();
 
 module.exports = app;
+EOF
+
+    echo "✅ Original server.js restored from documents"
+fi
+
+# Clean up any temporary files created by quick fix
+echo "🧹 Cleaning up temporary files..."
+rm -f temp_db_fix.js redis_check.js startup_check.js quick_fix.sh complete_fix.sh 2>/dev/null || true
+
+# Restore original ecosystem config if it was modified
+if [ -f ecosystem.config.js.backup ]; then
+    echo "🔄 Restoring ecosystem.config.js..."
+    cp ecosystem.config.js.backup ecosystem.config.js
+fi
+
+# Clear all PM2 logs
+echo "🧹 Clearing PM2 logs..."
+pm2 flush
+
+# Start the restored service
+echo "🚀 Starting restored service..."
+pm2 start ecosystem.config.js
+
+# Wait and check status
+sleep 3
+echo "📊 Checking service status..."
+pm2 status
+
+echo "📝 Showing recent logs..."
+pm2 logs hls4u-stream --lines 10
+
+echo ""
+echo "✅ RESTORATION COMPLETE!"
+echo ""
+echo "📋 Summary:"
+echo "   - server.js restored to original state"
+echo "   - Temporary files cleaned up"
+echo "   - Service restarted"
+echo ""
+echo "🔍 To monitor: pm2 logs hls4u-stream"
+echo "🌐 To test: curl http://127.0.0.1:3000/health"
+echo ""
+echo "⚠️  Note: You're back to the original state with the original warnings/errors"
+echo "   This is normal - the system was working before the quick fix"

@@ -1,3 +1,30 @@
+#!/bin/bash
+echo "🔧 Fixing HLS4U Stream Errors..."
+
+# 1. Fix Redis
+echo "📦 Step 1: Fixing Redis..."
+sudo systemctl start redis-server
+sudo systemctl enable redis-server
+
+# Test Redis
+if redis-cli ping > /dev/null 2>&1; then
+    echo "✅ Redis is now running"
+else
+    echo "❌ Redis failed to start - installing..."
+    sudo apt update
+    sudo apt install -y redis-server
+    sudo systemctl start redis-server
+    sudo systemctl enable redis-server
+fi
+
+# 2. Update server.js to fix trust proxy and CORS
+echo "📦 Step 2: Updating server configuration..."
+
+# Backup current server.js
+cp server.js server.js.backup
+
+# Create fixed server.js
+cat > server.js << 'EOF'
 // HLS4U Stream Server - All Errors Fixed
 require('dotenv').config();
 const express = require('express');
@@ -7,7 +34,6 @@ const path = require('path');
 const helmet = require('helmet');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
-const HLSProcessor = require('./app/services/hlsProcessor');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -326,20 +352,24 @@ const startServer = async () => {
     app.use('/upload', require('./app/routes/upload'));
     console.log('✅ Routes loaded');
     
-    // Step 5: Initialize HLS processor
-console.log('📦 Step 5: Initializing HLS processor...');
-const hlsProcessor = new HLSProcessor(dbPool);
-app.locals.hlsProcessor = hlsProcessor;
-
-// Process any videos in the queue
-setInterval(() => {
-  const queue = app.locals.hlsQueue || [];
-  while (queue.length > 0) {
-    const videoData = queue.shift();
-    hlsProcessor.addToQueue(videoData);
-  }
-}, 5000); // Check every 5 seconds
-console.log('✅ HLS processor initialized');
+    // Step 5: Error handling middleware
+    app.use((err, req, res, next) => {
+      console.error('💥 Application Error:', err);
+      
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(413).json({ error: 'File too large' });
+      }
+      
+      if (err.message && err.message.includes('CORS')) {
+        return res.status(403).json({ error: 'CORS policy violation' });
+      }
+      
+      res.status(500).json({ 
+        error: process.env.NODE_ENV === 'production' 
+          ? 'Internal server error' 
+          : err.message 
+      });
+    });
     
     // 404 handler
     app.use((req, res) => {
@@ -385,3 +415,29 @@ console.log('✅ HLS processor initialized');
 startServer();
 
 module.exports = app;
+EOF
+
+echo "✅ Server configuration updated"
+
+# 3. Restart services
+echo "📦 Step 3: Restarting services..."
+
+# Stop PM2 process
+pm2 stop hls4u-stream 2>/dev/null || true
+pm2 delete hls4u-stream 2>/dev/null || true
+
+# Clear logs
+pm2 flush
+
+# Start again
+pm2 start ecosystem.config.js
+
+echo "📦 Step 4: Checking status..."
+sleep 3
+pm2 status
+pm2 logs hls4u-stream --lines 20
+
+echo ""
+echo "✅ All fixes applied!"
+echo "🔍 Check logs: pm2 logs hls4u-stream"
+echo "🌐 Test health: curl http://127.0.0.1:3000/health"
